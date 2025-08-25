@@ -1,18 +1,31 @@
 # -*- coding: utf-8 -*-
-import re, json, hashlib, pathlib, yaml, requests, feedparser
+import os, re, json, hashlib, pathlib, yaml, requests, feedparser
+import traceback
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from lxml import html as lhtml
 from jinja2 import Template
+from requests.adapters import HTTPAdapter, Retry
 
 try:
     import trafilatura
-except:
+except Exception:
     trafilatura = None
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 
-# HTML 템플릿
+# ===== 환경설정 =====
+# "오늘" 기준 타임존 (중국 표준시 고정, 필요시 Asia/Seoul 로 바꾸세요)
+LOCAL_TZ = ZoneInfo(os.environ.get("LOCAL_TZ", "Asia/Shanghai"))
+
+# HTML 소스 전체를 임시로 건너뛰고 싶을 때(문제 도메인 많을 때): "1" 지정
+SKIP_HTML = os.environ.get("SKIP_HTML", "0") == "1"
+
+# HTML 상세 페이지 본문 추출 여부 (속도/안정성 위해 기본 ON)
+EXTRACT_BODY = os.environ.get("EXTRACT_BODY", "1") == "1"
+
+# ===== 템플릿 =====
 TEMPLATE = """<!doctype html><meta charset="utf-8">
 <title>China Robotics & AI Daily Clips</title>
 <style>
@@ -20,8 +33,10 @@ body{font-family:system-ui,apple-system,sans-serif;margin:24px}
 .grid{display:grid;gap:12px}
 .item{padding:12px;border:1px solid #eee;border-radius:12px}
 .tags{opacity:.7;font-size:12px}
+.meta{opacity:.7;font-size:12px;margin-bottom:12px}
 </style>
 <h1>China Robotics & AI Daily Clips (오늘 기사만)</h1>
+<div class=meta>Generated: __GEN__ (TZ: __TZ__)</div>
 <input id=q placeholder="검색/筛选..." oninput="f(this.value)" style="padding:10px;border:1px solid #ddd;border-radius:10px;width:100%;max-width:520px">
 <div class=grid id=list></div>
 <script>
@@ -35,93 +50,222 @@ function r(x){el.innerHTML=x.map(i=>`<div class=item>
 function f(q){q=q.toLowerCase();r(data.filter(i=>(i.title+i.summary+i.source).toLowerCase().includes(q)))} r(data);
 </script>"""
 
+# ===== HTTP 세션 (재시도 설정) =====
+def build_session():
+    s = requests.Session()
+    retries = Retry(
+        total=2,
+        backoff_factor=0.6,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "HEAD", "OPTIONS"]
+    )
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (compatible; RLWRLD-NewsBot/1.0; +https://github.com/)",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,ko;q=0.7",
+    })
+    s.mount("http://", HTTPAdapter(max_retries=retries))
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    return s
+
+SESSION = build_session()
+
+def http_get(url, timeout=15):
+    return SESSION.get(url, timeout=timeout)
+
+# ===== 유틸 =====
 def load_yaml(path):
     return yaml.safe_load(open(path, 'r', encoding='utf-8'))
 
 def sha(s): return hashlib.sha1(s.encode('utf-8')).hexdigest()
-def now(): return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-def http_get(url):
-    return requests.get(url, headers={"User-Agent":"Mozilla/5.0 RLWRLD/1.0"}, timeout=15)
+def now_utc_iso(): return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-def extract_readable(url: str) -> str:
-    if not trafilatura: return ""
+def today_window():
+    """로컬 타임존 기준 오늘 00:00~24:00"""
+    now_local = datetime.now(LOCAL_TZ)
+    start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start, end
+
+TODAY_START, TODAY_END = today_window()
+
+def is_today(dt_aware: datetime | None) -> bool:
+    if not dt_aware: 
+        return False
+    dt_local = dt_aware.astimezone(LOCAL_TZ)
+    return TODAY_START <= dt_local < TODAY_END
+
+def parse_dt_any(s: str | None) -> datetime | None:
+    if not s:
+        return None
     try:
-        downloaded = trafilatura.fetch_url(url)
-        if not downloaded: return ""
-        return trafilatura.extract(downloaded) or ""
-    except: return ""
+        # feedparser의 문자열 날짜 파싱은 제한적이라 requests/lxml에서 가져온 값만 처리
+        from dateutil import parser as dtparser
+        d = dtparser.parse(s)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d.astimezone(timezone.utc)
+    except Exception:
+        return None
 
-def fetch_rss(url):
-    d = feedparser.parse(http_get(url).content)
-    out=[]
-    for e in d.entries:
-        title=(e.get("title") or "").strip()
-        link=e.get("link","")
-        summ=(e.get("summary") or e.get("description") or "")[:300]
-        # 날짜 파싱
-        pub=None
-        for k in ["published_parsed","updated_parsed","created_parsed"]:
-            if getattr(e,k,None):
-                pub=datetime(*getattr(e,k)[:6],tzinfo=timezone.utc)
-                break
-        if not pub: pub=datetime.now(timezone.utc)
-        out.append({"title":title,"link":link,"summary":summ,"date":pub.isoformat()})
-    return out
+def extract_published_from_html(html_text: str) -> datetime | None:
+    """문서의 대표 발행일 메타를 찾아 UTC로 반환"""
+    try:
+        doc = lhtml.fromstring(html_text)
+        meta_xpaths = [
+            "//meta[@property='article:published_time']/@content",
+            "//meta[@name='article:published_time']/@content",
+            "//meta[@itemprop='datePublished']/@content",
+            "//meta[@name='pubdate']/@content",
+            "//meta[@property='og:updated_time']/@content",
+            "//time[@datetime]/@datetime",
+        ]
+        for xp in meta_xpaths:
+            vals = doc.xpath(xp)
+            if vals:
+                dt = parse_dt_any(vals[0])
+                if dt:
+                    return dt
+        return None
+    except Exception:
+        return None
 
-def discover_links(page_url, pattern, limit=30):
-    doc=lhtml.fromstring(http_get(page_url).text)
-    rx=re.compile(pattern,re.I) if pattern else None
-    links=[]
+def clean_text(s: str) -> str:
+    return (s or "").strip().replace("\u3000"," ").replace("\xa0"," ")
+
+# ===== 수집기 =====
+def fetch_rss(url: str):
+    """RSS에서 오늘 기사만 반환 (예외 발생 시 빈 리스트 반환)"""
+    try:
+        r = http_get(url, timeout=20)
+        r.raise_for_status()
+        d = feedparser.parse(r.content)
+        out=[]
+        for e in d.entries:
+            title = clean_text(e.get("title",""))
+            link = e.get("link","")
+            summ = clean_text((e.get("summary") or e.get("description") or "")[:400])
+            # 날짜
+            pub = None
+            for key in ["published_parsed", "updated_parsed", "created_parsed"]:
+                st = getattr(e, key, None)
+                if st:
+                    pub = datetime(*st[:6], tzinfo=timezone.utc)
+                    break
+            # 오늘만 남기기 (없으면 제외)
+            if not pub or not is_today(pub):
+                continue
+            out.append({"title": title, "link": link, "summary": summ, "date": pub.isoformat()})
+        return out
+    except Exception as ex:
+        print(f"[WARN][RSS] {url} -> {ex.__class__.__name__}: {ex}")
+        return []
+
+def fetch_html_today_items(list_url: str, link_pattern: str | None, limit=20):
+    """목록 페이지에서 기사 링크 후보 → 상세 페이지 열어 발행일 확인(오늘만)"""
+    if SKIP_HTML:
+        print(f"[INFO] SKIP_HTML=1, skip HTML source: {list_url}")
+        return []
+    try:
+        r = http_get(list_url, timeout=20)
+        r.raise_for_status()
+    except Exception as ex:
+        print(f"[WARN][HTML:list] {list_url} -> {ex.__class__.__name__}: {ex}")
+        return []
+
+    try:
+        doc = lhtml.fromstring(r.text)
+    except Exception as ex:
+        print(f"[WARN][HTML:parse] {list_url} -> {ex.__class__.__name__}: {ex}")
+        return []
+
+    rx = re.compile(link_pattern, re.I) if link_pattern else None
+    seen, items = set(), []
     for a in doc.xpath("//a[@href]"):
-        href=a.get("href"); 
-        if not href: continue
-        href=requests.compat.urljoin(page_url,href)
-        if rx and not rx.search(href): continue
-        txt=a.text_content().strip()
-        links.append({"title":txt or href,"link":href,"summary":"","date":now()})
-        if len(links)>=limit: break
-    return links
+        href = a.get("href")
+        if not href: 
+            continue
+        href = requests.compat.urljoin(list_url, href)
+        if rx and not rx.search(href):
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+        # 상세 페이지
+        try:
+            art = http_get(href, timeout=20)
+            art.raise_for_status()
+            pub = extract_published_from_html(art.text)
+            if not is_today(pub):
+                continue
+            title = clean_text(a.text_content()) or href
+            summary = ""
+            if EXTRACT_BODY and trafilatura:
+                try:
+                    dl = trafilatura.extract(art.text) or ""
+                    if dl:
+                        summary = clean_text(dl[:320])
+                except Exception:
+                    pass
+            items.append({"title": title, "link": href, "summary": summary, "date": (pub or datetime.now(timezone.utc)).isoformat()})
+            if len(items) >= limit:
+                break
+        except Exception as ex:
+            print(f"[WARN][HTML:detail] {href} -> {ex.__class__.__name__}: {ex}")
+            continue
+    return items
 
+# ===== 메인 =====
 def main():
-    feeds=load_yaml(ROOT/"feeds.yml")["feeds"]
-    kw=load_yaml(ROOT/"keywords.yml")
-    include=[re.compile(p,re.I) for p in kw.get("include",[])]
-    exclude=[re.compile(p,re.I) for p in kw.get("exclude",[])]
+    feeds = load_yaml(ROOT/"feeds.yml")["feeds"]
+    kw = load_yaml(ROOT/"keywords.yml")
+    include = [re.compile(p, re.I) for p in kw.get("include",[])]
+    exclude = [re.compile(p, re.I) for p in kw.get("exclude",[])]
 
-    # 오늘 날짜(중국 표준시 기준)
-    today=datetime.now(timezone(timedelta(hours=8))).date()
-
-    items,seen=[],set()
+    items, seen = [], set()
     for f in feeds:
-        name=f["name"]; url=f["url"]; typ=f.get("type","rss"); tags=f.get("tags",[])
-        cand=fetch_rss(url) if typ=="rss" else discover_links(url,f.get("link_pattern"))
-        for it in cand:
-            text=it["title"]+" "+it.get("summary","")
-            if include and not any(p.search(text) for p in include): continue
-            if exclude and any(p.search(text) for p in exclude): continue
-            # 날짜 필터: 오늘 것만
-            try:
-                pub=datetime.fromisoformat(it["date"].replace("Z","+00:00")).astimezone(timezone(timedelta(hours=8))).date()
-            except: pub=today
-            if pub!=today: continue
+        name = f["name"]; url = f["url"]; typ = f.get("type","rss"); tags = f.get("tags",[])
+        try:
+            if typ == "rss":
+                candidates = fetch_rss(url)
+            else:
+                candidates = fetch_html_today_items(url, f.get("link_pattern"), limit=20)
+        except Exception as ex:
+            print(f"[WARN][SOURCE] {name} -> {ex.__class__.__name__}: {ex}")
+            candidates = []
 
-            key=sha(it["link"] or it["title"])
-            if key in seen: continue
+        # 키워드 필터
+        for it in candidates:
+            text = (it["title"] + " " + it.get("summary",""))
+            if include and not any(p.search(text) for p in include): 
+                continue
+            if exclude and any(p.search(text) for p in exclude):
+                continue
+
+            key = sha(it["link"] or it["title"])
+            if key in seen:
+                continue
             seen.add(key)
 
-            if not it["summary"]:
-                body=extract_readable(it["link"])
-                if body: it["summary"]=body[:300]
-            it.update({"source":name,"tags":tags})
+            it.update({"source": name, "tags": tags})
             items.append(it)
 
-    items.sort(key=lambda x:x["date"],reverse=True)
+    # 최신순 정렬
+    items.sort(key=lambda x: x["date"], reverse=True)
 
-    DOCS.mkdir(exist_ok=True,parents=True)
-    (DOCS/"data.json").write_text(json.dumps(items,ensure_ascii=False,indent=2),"utf-8")
-    html=Template(TEMPLATE.replace("__DATA__",json.dumps(items,ensure_ascii=False))).render()
-    (DOCS/"index.html").write_text(html,"utf-8")
+    # 산출물 쓰기 (항상 성공하도록)
+    DOCS.mkdir(parents=True, exist_ok=True)
+    (DOCS/"data.json").write_text(json.dumps(items, ensure_ascii=False, indent=2), "utf-8")
 
-if __name__=="__main__":
+    html = Template(
+        TEMPLATE
+        .replace("__DATA__", json.dumps(items, ensure_ascii=False))
+        .replace("__GEN__", now_utc_iso())
+        .replace("__TZ__", str(LOCAL_TZ))
+    ).render()
+    (DOCS/"index.html").write_text(html, "utf-8")
+
+    print(f"[INFO] Collected {len(items)} items from {len(feeds)} sources.")
+
+if __name__ == "__main__":
     main()
