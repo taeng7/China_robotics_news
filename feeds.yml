@@ -111,3 +111,10 @@ feeds:
     url: https://www.deeptechchina.com/
     link_pattern: "deeptechchina\\.com/.*(article|news|p/\\d+)"
     tags: [tech, research]
+
+  - name: 中国电子学会 · 新闻资讯
+    type: html
+    url: https://www.cie.org.cn/list_42/
+    link_pattern: "cie\\.org\\.cn/(site/)?content/\\d+\\.html"
+    tags: [authoritative, association, electronics]
+
