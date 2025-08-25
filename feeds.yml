@@ -1,0 +1,111 @@
+# 중국 로보틱스/AI 커버리지 극대화: RSS(우선) + HTML 페이지(보완) 혼합
+# type: rss | html
+# html 소스는 링크를 긁어오고 키워드로 2차 필터링합니다.
+feeds:
+  # --- 주요 중국 종합/재경/科技 매체 (RSSHub/공식 RSS 위주) ---
+  - name: 人民网 全部新闻
+    type: rss
+    url: https://www.people.com.cn/rss/ywkx.xml
+    tags: [authoritative, state, general]
+
+  - name: 36氪 快讯
+    type: rss
+    url: https://rsshub.app/36kr/newsflashes?limit=50
+    tags: [tech, venture]
+
+  - name: 36氪 热榜
+    type: rss
+    url: https://rsshub.app/36kr/hot-list
+    tags: [tech, venture]
+
+  - name: 澎湃 热点
+    type: rss
+    url: https://rsshub.app/thepaper/featured
+    tags: [general, media]
+
+  - name: 界面 新闻（栏目精选）
+    type: rss
+    url: https://rsshub.app/jiemian/list/32
+    tags: [business, tech]
+
+  - name: 财新 最新文章
+    type: rss
+    url: https://rsshub.rssforever.com/caixin/latest
+    tags: [business, finance]
+
+  - name: 雷锋网 机器人
+    type: rss
+    url: https://www.leiphone.com/feed/categoryRss/name/robot
+    tags: [robotics, tech]
+
+  - name: InfoQ 话题: 机器学习
+    type: rss
+    url: https://www.infoq.cn/public/v1/article/channel/71/rss  # 일부 리더에서 동작, 필요시 교체
+    tags: [ml, engineering]
+
+  # --- 커뮤니티/소셜 트렌드 ---
+  - name: 微博 热搜（全文）
+    type: rss
+    url: https://rsshub.app/weibo/search/hot/fulltext
+    tags: [social, trending]
+
+  - name: 知乎 热榜
+    type: rss
+    url: https://rsshub.app/zhihu/hot?limit=50
+    tags: [community, qa]
+
+  # --- 사용자가 지정한 6개 권위 플랫폼 (RSS 없으면 HTML로 보완) ---
+  - name: 机器人大讲堂（立德机器人）
+    type: html
+    url: https://www.leaderobot.com/
+    link_pattern: "(leaderobot\.com|leader-admin\.leaderobot\.com)/news/\d+"
+    tags: [robotics, industry]
+
+  - name: 中国机器人网（新闻）
+    type: html
+    url: https://www.robot-china.com/news/
+    link_pattern: "robot-china\.com/news/\d{4,}"
+    tags: [robotics, industry]
+
+  - name: 麻省理工科技评论（中文版/DeepTech入口）
+    type: html
+    url: https://www.mittrchina.com/
+    link_pattern: "mittrchina\.com/(news|article|feature)/\d+"
+    tags: [tech, research]
+
+  - name: OFweek 机器人网（产业新闻）
+    type: html
+    url: https://robot.ofweek.com/CATList-8321200-8100-robot.html
+    link_pattern: "robot\.ofweek\.com/.*(news|\d{4})"
+    tags: [robotics, industry]
+
+  - name: 世界机器人大会（新闻速递）
+    type: html
+    url: https://www.worldrobotconference.com/news/latestnews/
+    link_pattern: "worldrobotconference\.com/.*(news|latestnews|detail)"
+    tags: [robotics, conference]
+
+  - name: 中国机器人峰会（余姚）
+    type: html
+    url: https://chinarobtop.com/
+    link_pattern: "(chinarobtop\.com|roboticschina\.com)/.*(news|content|show)"
+    tags: [robotics, summit]
+
+  # --- 로보틱스/AI 전문 매체 (HTML 보완) ---
+  - name: 机器之心（门户）
+    type: html
+    url: https://www.jiqizhixin.com/
+    link_pattern: "jiqizhixin\.com/(articles|news)/\d{4}"
+    tags: [ai, robotics]
+
+  - name: 量子位（门户）
+    type: html
+    url: https://www.qbitai.com/
+    link_pattern: "qbitai\.com/\d{4}/\d{2}/\d{2}/.*"
+    tags: [ai, general]
+
+  - name: 深科技 DeepTech
+    type: html
+    url: https://www.deeptechchina.com/
+    link_pattern: "deeptechchina\.com/.*(article|news|p/\d+)"
+    tags: [tech, research]

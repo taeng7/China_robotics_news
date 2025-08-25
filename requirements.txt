@@ -1,0 +1,6 @@
+feedparser
+trafilatura
+jinja2
+PyYAML
+requests
+lxml
