@@ -1,6 +1,14 @@
 # -*- coding: utf-8 -*-
-import os, re, json, hashlib, pathlib, yaml, requests, feedparser
-import traceback
+"""
+지난 24시간 내 기사만 수집하는 버전
+- 기준 타임존: 환경변수 LOCAL_TZ (기본 Asia/Seoul)
+- 윈도우 길이(시간): 환경변수 WINDOW_HOURS (기본 24)
+- RSS는 published/updated가 없는 항목은 제외
+- HTML은 상세 페이지에서 datePublished 등 메타를 못 찾으면 제외
+- 네트워크 오류/차단은 개별 소스만 건너뛰고 빌드는 성공하도록 설계
+"""
+
+import os, re, json, hashlib, pathlib, yaml, requests, feedparser, traceback
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from lxml import html as lhtml
@@ -15,19 +23,15 @@ except Exception:
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 
-# ===== 환경설정 =====
-# "오늘" 기준 타임존 (중국 표준시 고정, 필요시 Asia/Seoul 로 바꾸세요)
-LOCAL_TZ = ZoneInfo(os.environ.get("LOCAL_TZ", "Asia/Shanghai"))
-
-# HTML 소스 전체를 임시로 건너뛰고 싶을 때(문제 도메인 많을 때): "1" 지정
-SKIP_HTML = os.environ.get("SKIP_HTML", "0") == "1"
-
-# HTML 상세 페이지 본문 추출 여부 (속도/안정성 위해 기본 ON)
-EXTRACT_BODY = os.environ.get("EXTRACT_BODY", "1") == "1"
+# ===== 설정 =====
+LOCAL_TZ = ZoneInfo(os.environ.get("LOCAL_TZ", "Asia/Seoul"))
+WINDOW_HOURS = int(os.environ.get("WINDOW_HOURS", "24"))  # 수집 윈도우(시간)
+SKIP_HTML = os.environ.get("SKIP_HTML", "0") == "1"       # HTML 소스 일괄 스킵 스위치
+EXTRACT_BODY = os.environ.get("EXTRACT_BODY", "1") == "1" # 본문 요약 추출
 
 # ===== 템플릿 =====
 TEMPLATE = """<!doctype html><meta charset="utf-8">
-<title>China Robotics & AI Daily Clips</title>
+<title>China Robotics & AI — Last 24h</title>
 <style>
 body{font-family:system-ui,apple-system,sans-serif;margin:24px}
 .grid{display:grid;gap:12px}
@@ -35,8 +39,8 @@ body{font-family:system-ui,apple-system,sans-serif;margin:24px}
 .tags{opacity:.7;font-size:12px}
 .meta{opacity:.7;font-size:12px;margin-bottom:12px}
 </style>
-<h1>China Robotics & AI Daily Clips (오늘 기사만)</h1>
-<div class=meta>Generated: __GEN__ (TZ: __TZ__)</div>
+<h1>China Robotics & AI — Last {{hours}}h</h1>
+<div class=meta>Window: {{win_start}} → {{win_end}} ({{tz}}) · Generated: {{generated}}</div>
 <input id=q placeholder="검색/筛选..." oninput="f(this.value)" style="padding:10px;border:1px solid #ddd;border-radius:10px;width:100%;max-width:520px">
 <div class=grid id=list></div>
 <script>
@@ -45,12 +49,12 @@ function r(x){el.innerHTML=x.map(i=>`<div class=item>
 <div class=tags>${i.source} · ${i.tags.join(', ')}</div>
 <h3><a href="${i.link}" target=_blank rel=noopener>${i.title}</a></h3>
 <div>${i.summary||''}</div>
-<div class=tags>${i.date}</div>
+<div class=tags>${new Date(i.date).toLocaleString()}</div>
 </div>`).join('');}
 function f(q){q=q.toLowerCase();r(data.filter(i=>(i.title+i.summary+i.source).toLowerCase().includes(q)))} r(data);
 </script>"""
 
-# ===== HTTP 세션 (재시도 설정) =====
+# ===== HTTP 세션 (재시도) =====
 def build_session():
     s = requests.Session()
     retries = Retry(
@@ -73,33 +77,29 @@ def http_get(url, timeout=15):
     return SESSION.get(url, timeout=timeout)
 
 # ===== 유틸 =====
-def load_yaml(path):
-    return yaml.safe_load(open(path, 'r', encoding='utf-8'))
-
+def load_yaml(path): return yaml.safe_load(open(path, 'r', encoding='utf-8'))
 def sha(s): return hashlib.sha1(s.encode('utf-8')).hexdigest()
+def now_utc(): return datetime.now(timezone.utc)
+def now_utc_iso(): return now_utc().isoformat(timespec="seconds")
 
-def now_utc_iso(): return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def window_bounds():
+    """로컬 타임존 기준 '지금 - WINDOW_HOURS' ~ '지금'의 UTC 범위를 반환"""
+    end_local = datetime.now(LOCAL_TZ)
+    start_local = end_local - timedelta(hours=WINDOW_HOURS)
+    return start_local, end_local
 
-def today_window():
-    """로컬 타임존 기준 오늘 00:00~24:00"""
-    now_local = datetime.now(LOCAL_TZ)
-    start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
-    return start, end
+WIN_START_LOCAL, WIN_END_LOCAL = window_bounds()
 
-TODAY_START, TODAY_END = today_window()
-
-def is_today(dt_aware: datetime | None) -> bool:
-    if not dt_aware: 
+def in_window(dt_aware: datetime | None) -> bool:
+    if not dt_aware:
         return False
     dt_local = dt_aware.astimezone(LOCAL_TZ)
-    return TODAY_START <= dt_local < TODAY_END
+    return WIN_START_LOCAL <= dt_local <= WIN_END_LOCAL
 
 def parse_dt_any(s: str | None) -> datetime | None:
     if not s:
         return None
     try:
-        # feedparser의 문자열 날짜 파싱은 제한적이라 requests/lxml에서 가져온 값만 처리
         from dateutil import parser as dtparser
         d = dtparser.parse(s)
         if d.tzinfo is None:
@@ -135,16 +135,13 @@ def clean_text(s: str) -> str:
 
 # ===== 수집기 =====
 def fetch_rss(url: str):
-    """RSS에서 오늘 기사만 반환 (예외 발생 시 빈 리스트 반환)"""
+    """RSS에서 지난 24h(윈도우) 기사만 반환. 실패 시 빈 리스트."""
     try:
         r = http_get(url, timeout=20)
         r.raise_for_status()
         d = feedparser.parse(r.content)
         out=[]
         for e in d.entries:
-            title = clean_text(e.get("title",""))
-            link = e.get("link","")
-            summ = clean_text((e.get("summary") or e.get("description") or "")[:400])
             # 날짜
             pub = None
             for key in ["published_parsed", "updated_parsed", "created_parsed"]:
@@ -152,17 +149,20 @@ def fetch_rss(url: str):
                 if st:
                     pub = datetime(*st[:6], tzinfo=timezone.utc)
                     break
-            # 오늘만 남기기 (없으면 제외)
-            if not pub or not is_today(pub):
-                continue
+            if not in_window(pub):
+                continue  # 윈도우 밖이거나 날짜 없음 -> 제외
+
+            title = clean_text(e.get("title",""))
+            link  = e.get("link","")
+            summ  = clean_text((e.get("summary") or e.get("description") or "")[:400])
             out.append({"title": title, "link": link, "summary": summ, "date": pub.isoformat()})
         return out
     except Exception as ex:
         print(f"[WARN][RSS] {url} -> {ex.__class__.__name__}: {ex}")
         return []
 
-def fetch_html_today_items(list_url: str, link_pattern: str | None, limit=20):
-    """목록 페이지에서 기사 링크 후보 → 상세 페이지 열어 발행일 확인(오늘만)"""
+def fetch_html_window_items(list_url: str, link_pattern: str | None, limit=20):
+    """목록 페이지에서 링크 후보 → 상세에서 발행일 확인 → 윈도우 내만 반환"""
     if SKIP_HTML:
         print(f"[INFO] SKIP_HTML=1, skip HTML source: {list_url}")
         return []
@@ -183,7 +183,7 @@ def fetch_html_today_items(list_url: str, link_pattern: str | None, limit=20):
     seen, items = set(), []
     for a in doc.xpath("//a[@href]"):
         href = a.get("href")
-        if not href: 
+        if not href:
             continue
         href = requests.compat.urljoin(list_url, href)
         if rx and not rx.search(href):
@@ -191,13 +191,15 @@ def fetch_html_today_items(list_url: str, link_pattern: str | None, limit=20):
         if href in seen:
             continue
         seen.add(href)
-        # 상세 페이지
+
+        # 상세에서 발행일 확인
         try:
             art = http_get(href, timeout=20)
             art.raise_for_status()
             pub = extract_published_from_html(art.text)
-            if not is_today(pub):
+            if not in_window(pub):
                 continue
+
             title = clean_text(a.text_content()) or href
             summary = ""
             if EXTRACT_BODY and trafilatura:
@@ -207,7 +209,10 @@ def fetch_html_today_items(list_url: str, link_pattern: str | None, limit=20):
                         summary = clean_text(dl[:320])
                 except Exception:
                     pass
-            items.append({"title": title, "link": href, "summary": summary, "date": (pub or datetime.now(timezone.utc)).isoformat()})
+            items.append({
+                "title": title, "link": href, "summary": summary,
+                "date": (pub or now_utc()).isoformat()
+            })
             if len(items) >= limit:
                 break
         except Exception as ex:
@@ -229,7 +234,7 @@ def main():
             if typ == "rss":
                 candidates = fetch_rss(url)
             else:
-                candidates = fetch_html_today_items(url, f.get("link_pattern"), limit=20)
+                candidates = fetch_html_window_items(url, f.get("link_pattern"), limit=20)
         except Exception as ex:
             print(f"[WARN][SOURCE] {name} -> {ex.__class__.__name__}: {ex}")
             candidates = []
@@ -253,19 +258,22 @@ def main():
     # 최신순 정렬
     items.sort(key=lambda x: x["date"], reverse=True)
 
-    # 산출물 쓰기 (항상 성공하도록)
+    # 산출물
     DOCS.mkdir(parents=True, exist_ok=True)
     (DOCS/"data.json").write_text(json.dumps(items, ensure_ascii=False, indent=2), "utf-8")
 
-    html = Template(
-        TEMPLATE
-        .replace("__DATA__", json.dumps(items, ensure_ascii=False))
-        .replace("__GEN__", now_utc_iso())
-        .replace("__TZ__", str(LOCAL_TZ))
-    ).render()
+    # HTML 렌더
+    html = Template(TEMPLATE).render(
+        hours=WINDOW_HOURS,
+        win_start=WIN_START_LOCAL.strftime("%Y-%m-%d %H:%M:%S"),
+        win_end=WIN_END_LOCAL.strftime("%Y-%m-%d %H:%M:%S"),
+        tz=str(LOCAL_TZ),
+        generated=now_utc_iso()
+    )
+    html = html.replace("__DATA__", json.dumps(items, ensure_ascii=False))
     (DOCS/"index.html").write_text(html, "utf-8")
 
-    print(f"[INFO] Collected {len(items)} items from {len(feeds)} sources.")
+    print(f"[INFO] Collected {len(items)} items from {len(feeds)} sources within last {WINDOW_HOURS}h.")
 
 if __name__ == "__main__":
     main()
