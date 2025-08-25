@@ -1,12 +1,15 @@
 name: china-robotics-news
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * *"   # 매일 12:00 UTC 실행 (중국 20:00, 한국 21:00)
+    - cron: "0 8 * * *"   # 매일 08:00 UTC = 17:00 KST(Asia/Seoul)
+
 permissions:
   contents: write
   pages: write
   id-token: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,12 +19,20 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-      - run: python src/fetch.py
-      - uses: actions/upload-pages-artifact@v3
+      - name: Fetch & Render (last 24h)
+        env:
+          LOCAL_TZ: Asia/Seoul     # 중국 기준이면 Asia/Shanghai 로 변경
+          WINDOW_HOURS: "24"
+          SKIP_HTML: "0"
+          EXTRACT_BODY: "1"
+        run: python src/fetch.py
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
         with:
           path: docs
   deploy:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/deploy-pages@v4
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
