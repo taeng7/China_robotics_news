@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 지난 24시간 내 기사만 수집 + 리서치 요약 출력
-- 기준 타임존: 환경변수 LOCAL_TZ (기본 Asia/Seoul)
-- 윈도우 길이(시간): 환경변수 WINDOW_HOURS (기본 24)
-- RSS는 published/updated가 없는 항목은 제외
-- HTML은 상세 페이지에서 datePublished 등 메타를 못 찾으면 제외
-- 결과 HTML 상단에 "리서치 요약"을 표시
 """
 
 import os, re, json, hashlib, pathlib, yaml, requests, feedparser
@@ -81,6 +76,15 @@ def build_session():
 SESSION = build_session()
 def http_get(url, timeout=15): return SESSION.get(url, timeout=timeout)
 
+# ===== 유틸 =====
+def load_yaml(path):
+    """YAML 파일 로드"""
+    return yaml.safe_load(open(path, 'r', encoding='utf-8'))
+
+def sha(s): return hashlib.sha1(s.encode('utf-8')).hexdigest()
+def now_utc(): return datetime.now(timezone.utc)
+def now_utc_iso(): return now_utc().isoformat(timespec="seconds")
+
 # ===== 시간 윈도우 =====
 def window_bounds():
     end_local = datetime.now(LOCAL_TZ)
@@ -124,8 +128,6 @@ def extract_published_from_html(html_text: str):
 
 def clean_text(s: str) -> str:
     return (s or "").strip().replace("\u3000"," ").replace("\xa0"," ")
-
-def sha(s): return hashlib.sha1(s.encode('utf-8')).hexdigest()
 
 # ===== 수집기 =====
 def fetch_rss(url: str):
