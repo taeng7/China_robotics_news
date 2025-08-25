@@ -87,12 +87,6 @@ feeds:
     link_pattern: "robot\\.ofweek\\.com/.*(news|\\d{4})"
     tags: [robotics, industry]
 
-  - name: 世界机器人大会 WRC
-    type: html
-    url: https://www.worldrobotconference.com/news/latestnews/
-    link_pattern: "worldrobotconference\\.com/.*(news|latestnews|detail)"
-    tags: [robotics, conference]
-
   - name: 中国机器人峰会（余姚）
     type: html
     url: https://chinarobtop.com/
