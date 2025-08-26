@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-지난 24시간 내 기사만 수집 + 리서치 요약 출력
+중국 로봇·AI 뉴스 자동 클리핑 (날짜 완화 + 리서치 요약)
 """
 
 import os, re, json, hashlib, pathlib, yaml, requests, feedparser
@@ -20,7 +20,7 @@ DOCS = ROOT / "docs"
 
 # ===== 설정 =====
 LOCAL_TZ = ZoneInfo(os.environ.get("LOCAL_TZ", "Asia/Seoul"))
-WINDOW_HOURS = int(os.environ.get("WINDOW_HOURS", "24"))
+WINDOW_HOURS = int(os.environ.get("WINDOW_HOURS", "72"))  # 기본 72h
 SKIP_HTML = os.environ.get("SKIP_HTML", "0") == "1"
 EXTRACT_BODY = os.environ.get("EXTRACT_BODY", "1") == "1"
 
@@ -59,7 +59,7 @@ function r(x){el.innerHTML=x.map(i=>`<div class=item>
 function f(q){q=q.toLowerCase();r(data.filter(i=>(i.title+i.summary+i.source).toLowerCase().includes(q)))} r(data);
 </script>"""
 
-# ===== HTTP 세션 (재시도) =====
+# ===== HTTP 세션 =====
 def build_session():
     s = requests.Session()
     retries = Retry(total=2, backoff_factor=0.6,
@@ -74,13 +74,10 @@ def build_session():
     return s
 
 SESSION = build_session()
-def http_get(url, timeout=15): return SESSION.get(url, timeout=timeout)
+def http_get(url, timeout=20): return SESSION.get(url, timeout=timeout)
 
 # ===== 유틸 =====
-def load_yaml(path):
-    """YAML 파일 로드"""
-    return yaml.safe_load(open(path, 'r', encoding='utf-8'))
-
+def load_yaml(path): return yaml.safe_load(open(path, 'r', encoding='utf-8'))
 def sha(s): return hashlib.sha1(s.encode('utf-8')).hexdigest()
 def now_utc(): return datetime.now(timezone.utc)
 def now_utc_iso(): return now_utc().isoformat(timespec="seconds")
@@ -90,11 +87,10 @@ def window_bounds():
     end_local = datetime.now(LOCAL_TZ)
     start_local = end_local - timedelta(hours=WINDOW_HOURS)
     return start_local, end_local
-
 WIN_START_LOCAL, WIN_END_LOCAL = window_bounds()
 
 def in_window(dt_aware: datetime | None) -> bool:
-    if not dt_aware: return False
+    if not dt_aware: return True  # 날짜 없으면 그냥 통과
     dt_local = dt_aware.astimezone(LOCAL_TZ)
     return WIN_START_LOCAL <= dt_local <= WIN_END_LOCAL
 
@@ -140,6 +136,7 @@ def fetch_rss(url: str):
             for key in ["published_parsed","updated_parsed","created_parsed"]:
                 st = getattr(e, key, None)
                 if st: pub=datetime(*st[:6],tzinfo=timezone.utc); break
+            if not pub: pub = now_utc()  # 날짜 없으면 지금으로
             if not in_window(pub): continue
             title=clean_text(e.get("title",""))
             link=e.get("link","")
@@ -170,6 +167,7 @@ def fetch_html_window_items(list_url: str, link_pattern: str | None, limit=20):
         try:
             art=http_get(href,timeout=20); art.raise_for_status()
             pub=extract_published_from_html(art.text)
+            if not pub: pub = now_utc()
             if not in_window(pub): continue
             title=clean_text(a.text_content()) or href
             summary=""
@@ -179,7 +177,7 @@ def fetch_html_window_items(list_url: str, link_pattern: str | None, limit=20):
                     if dl: summary=clean_text(dl[:320])
                 except: pass
             items.append({"title":title,"link":href,"summary":summary,
-                          "date":(pub or datetime.now(timezone.utc)).isoformat()})
+                          "date":pub.isoformat()})
             if len(items)>=limit: break
         except Exception as ex:
             print(f"[WARN][HTML:detail] {href} -> {ex}")
